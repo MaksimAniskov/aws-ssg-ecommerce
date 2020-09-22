@@ -1,0 +1,20 @@
+{
+  "name": "aws-ssg-ecommerce-lambda",
+  "description": "AWS Lambda function forming solution's backend",
+  "version": "1.0.0",
+  "main": "index.js",
+  "author": "Maksim Aniskov <maksimaniskov@gmail.com>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MaksimAniskov/aws-ssg-ecommerce.git"
+  },
+  "dependencies": {
+    "aws-serverless-express": "^3.3.8",
+    "body-parser": "^1.19.0",
+    "cors": "^2.8.5",
+    "express": "^4.17.1",
+    "stripe": "^8.76.0",
+    "unzipper": "^0.10.11"
+  }
+}

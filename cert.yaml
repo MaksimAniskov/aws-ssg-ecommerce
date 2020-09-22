@@ -1,0 +1,40 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  SSG e-commerce solution: Create Route53 Zone and "global" ACM certificate
+
+Parameters:
+  DomainName:
+    Type: String
+
+  HostedZoneId:
+    Type: String
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: ""
+        Parameters:
+          - DomainName
+          - HostedZoneId
+    ParameterLabels:
+      DomainName:
+        default: Domain name
+
+      HostedZoneId:
+        default: Amazon Route 53 Hosted Zone id
+
+Outputs:
+  CertificateArn:
+    Value: !Ref Certificate
+
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId

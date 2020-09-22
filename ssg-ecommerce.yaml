@@ -1,0 +1,1528 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: SSG e-commerce solution. v1.0.0 See https://github.com/MaksimAniskov/aws-ssg-ecommerce
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  ShopName:
+    Type: String
+
+  ShopEmail:
+    Type: String
+
+  ShopLegalAddress:
+    Type: String
+
+  ShopGatsbyAppProjectZipUrl:
+    Type: String
+    Default: https://github.com/MaksimAniskov/aws-ssg-ecommerce-jam/archive/1.0.0.tar.gz
+
+  PreviewWebsiteWhitelistCIDRs:
+    Type: String
+    Description: IP address or range in CIDR format
+    Default: 0.0.0.0/32
+
+  CloudFrontPriceClass:
+    Type: String
+    Default: PriceClass_100
+    AllowedValues:
+      - PriceClass_100
+      - PriceClass_200
+      - PriceClass_All
+    Description: See https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/PriceClass.html
+
+  InventoryArchiveFileName:
+    Type: String
+    Default: inventory.zip
+
+  ShippingRulesArchiveFileName:
+    Type: String
+    Default: shipping_rules.zip
+
+  ShopSettingsArchiveFileName:
+    Type: String
+    Default: shop_settings.zip
+
+  StripeSecretKey:
+    Type: String
+    NoEcho: true
+
+  StripeWebhookSigningSecret:
+    Type: String
+    Default: ""
+    NoEcho: true
+
+  DomainName:
+    Type: String
+    Default: ""
+
+  CloudFrontCertificateArn:
+    Type: String
+    Description: Must be in the US East (N. Virginia) region
+    Default: ""
+
+  SendOrderConfirmationEmail:
+    Type: String
+    AllowedValues:
+      - disabled
+      - to the shop
+      - to the shop and to the buyer
+    Default: "disabled"
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: Basic
+        Parameters:
+          - ShopName
+          - ShopEmail
+          - ShopLegalAddress
+          - ShopGatsbyAppProjectZipUrl
+          - PreviewWebsiteWhitelistCIDRs
+          - CloudFrontPriceClass
+      - Label:
+          default: Shop Database
+        Parameters:
+          - InventoryArchiveFileName
+          - ShippingRulesArchiveFileName
+          - ShopSettingsArchiveFileName
+      - Label:
+          default: Stripe (optional)
+        Parameters:
+          - StripeSecretKey
+          - StripeWebhookSigningSecret
+      - Label:
+          default: Custom Domain Name (optional)
+        Parameters:
+          - DomainName
+          - CloudFrontCertificateArn
+      - Label:
+          default: Order Confirmation Emails (optional)
+        Parameters:
+          - SendOrderConfirmationEmail
+
+    ParameterLabels:
+      ShopName:
+        default: Shop name
+      ShopEmail:
+        default: Shop owner email address
+      ShopLegalAddress:
+        default: Shop legal address
+      ShopGatsbyAppProjectZipUrl:
+        default: Storefront application archive URL
+      PreviewWebsiteWhitelistCIDRs:
+        default: Access to the preview website
+      CloudFrontPriceClass:
+        default: CloudFront price class
+      InventoryArchiveFileName:
+        default: Inventory
+      ShippingRulesArchiveFileName:
+        default: Shipping rules
+      ShopSettingsArchiveFileName:
+        default: Shop settings
+      StripeSecretKey:
+        default: Secret key
+      StripeWebhookSigningSecret:
+        default: Webhook signing secret
+      DomainName:
+        default: Domain name
+      CloudFrontCertificateArn:
+        default: CloudFront certificate ARN
+      SendOrderConfirmationEmail:
+        default: Mode
+
+Outputs:
+  aProductImagesBucket:
+    Value: !Ref ProductImages
+
+  bShopDatabaseBucket:
+    Value: !Ref ShopDatabase
+
+  cStaticAssetsBucket:
+    Value: !Ref Assets
+
+  dPreviewUrl:
+    Value: !GetAtt PreviewWebsite.WebsiteURL
+
+  eShopUrl:
+    Value: !Sub
+      - https://${DomainName}
+      - DomainName: !If
+          - CustomDomainNameAndCertificate
+          - !Ref DomainName
+          - !GetAtt CloudFrontDistribution.DomainName
+
+  fStripeWebhookEndpoint:
+    Value: !Sub https://${BackendApi}.execute-api.${AWS::Region}.amazonaws.com/v1/stripewebhook
+
+  gNameServers:
+    Value:
+      !If [CustomDomainName, !Join [",", !GetAtt HostedZone.NameServers], ""]
+
+  hHostedZoneId:
+    Value: !If [CustomDomainName, !Ref HostedZone, ""]
+
+Conditions:
+  CustomDomainName: !Not [!Equals ["", !Ref DomainName]]
+
+  CustomDomainNameAndCertificate: !And
+    - !Not [!Equals ["", !Ref DomainName]]
+    - !Not [!Equals ["", !Ref CloudFrontCertificateArn]]
+
+Resources:
+  ShopDatabase:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  ProductImages:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  Assets:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  Website:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref Website
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOAI.S3CanonicalUserId
+            Action: s3:GetObject
+            Resource: !Sub ${Website.Arn}/*
+          - Effect: Allow
+            Principal:
+              CanonicalUser: !GetAtt CloudFrontOAI.S3CanonicalUserId
+            Action: s3:ListBucket
+            Resource: !Sub ${Website.Arn}
+
+  PreviewWebsite:
+    Type: AWS::S3::Bucket
+    Properties:
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: 404/index.html
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  PreviewWebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref PreviewWebsite
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub ${PreviewWebsite.Arn}/*
+            Condition:
+              IpAddress:
+                aws:SourceIp: !Split [",", !Ref PreviewWebsiteWhitelistCIDRs]
+
+  CloudFrontDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Aliases:
+          - !If [
+              CustomDomainNameAndCertificate,
+              !Ref DomainName,
+              !Ref "AWS::NoValue",
+            ]
+        Origins:
+          - Id: s3
+            DomainName: !Sub ${Website}.s3.${AWS::Region}.amazonaws.com
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOAI}
+        DefaultCacheBehavior:
+          ViewerProtocolPolicy: redirect-to-https
+          TargetOriginId: s3
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          Compress: yes
+          ForwardedValues:
+            Cookies:
+              Forward: none
+            QueryString: no
+        DefaultRootObject: index.html
+        PriceClass: !Ref CloudFrontPriceClass
+        Enabled: yes
+        IPV6Enabled: yes
+        ViewerCertificate: !If
+          - CustomDomainNameAndCertificate
+          - AcmCertificateArn: !Ref CloudFrontCertificateArn
+            SslSupportMethod: sni-only
+            MinimumProtocolVersion: TLSv1.2_2019
+          - !Ref "AWS::NoValue"
+        HttpVersion: http2
+        CustomErrorResponses:
+          - ErrorCode: 404
+            ResponsePagePath: /404/index.html
+            ResponseCode: 404
+            ErrorCachingMinTTL: 300
+        Comment: !Ref AWS::StackName
+
+  CloudFrontOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Ref AWS::StackName
+
+  Update:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Ref AWS::StackName
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref DoNotTouchThis
+      Stages:
+        - Name: Sources
+          Actions:
+            - Name: Inventory
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: "1"
+              Configuration:
+                PollForSourceChanges: false
+                S3Bucket: !Ref ShopDatabase
+                S3ObjectKey: !Ref InventoryArchiveFileName
+              OutputArtifacts:
+                - Name: InventoryData
+            - Name: ShippingRules
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: "1"
+              Configuration:
+                PollForSourceChanges: false
+                S3Bucket: !Ref ShopDatabase
+                S3ObjectKey: !Ref ShippingRulesArchiveFileName
+              OutputArtifacts:
+                - Name: ShippingRulesData
+            - Name: ShopSettings
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: S3
+                Version: "1"
+              Configuration:
+                PollForSourceChanges: false
+                S3Bucket: !Ref ShopDatabase
+                S3ObjectKey: !Ref ShopSettingsArchiveFileName
+              OutputArtifacts:
+                - Name: ShopSettingsData
+        - Name: GenerateAndDeployForPreview
+          Actions:
+            - Name: DoEverything
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectBuild
+                PrimarySource: InventoryData
+              InputArtifacts:
+                - Name: InventoryData
+                - Name: ShippingRulesData
+                - Name: ShopSettingsData
+              OutputArtifacts:
+                - Name: SiteContent
+        - Name: Deploy
+          Actions:
+            - RunOrder: 1
+              Name: Approve
+              ActionTypeId:
+                Category: Approval
+                Owner: AWS
+                Provider: Manual
+                Version: "1"
+              Configuration:
+                CustomData: Review your shop at following location before to make the changes public.
+                ExternalEntityLink: !GetAtt PreviewWebsite.WebsiteURL
+            - RunOrder: 2
+              Name: CopyToWebsite
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              Configuration:
+                ProjectName: !Ref CodeBuildProjectDeploy
+              InputArtifacts:
+                - Name: SiteContent
+
+  CodeBuildProjectBuild:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-build
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            install:
+              commands:
+                - mkdir aws-ssg-ecommerce && mkdir aws-ssg-ecommerce/lambda
+                - wget $(aws lambda get-function --function-name ${Backend} --query 'Code.Location' --output text) -O lambda.zip
+                - unzip lambda.zip -d aws-ssg-ecommerce/lambda 'lib/*'
+
+                - mkdir jam && cd jam
+                - mkdir shop && mkdir shop/database
+                - mv $CODEBUILD_SRC_DIR/inventory.json shop/database
+                - mv $CODEBUILD_SRC_DIR_ShippingRulesData/*.json shop/database
+                - mv $CODEBUILD_SRC_DIR_ShopSettingsData/*.json shop/database
+                - aws s3 cp --recursive --quiet s3://${ProductImages} shop/productimages
+                - ls shop/productimages
+                - wget ${ShopGatsbyAppProjectZipUrl} -O gatsby-project.zip
+                - tar -xzf gatsby-project.zip --strip 1
+                - yarn install
+                - aws s3 cp --recursive --quiet s3://${Assets} src
+            build:
+              commands:
+                - |
+                  echo '{"backendUrl": "https://${BackendApi}.execute-api.${AWS::Region}.amazonaws.com/v1"}' > settings.json
+                - npm run build build
+            post_build:
+              commands:
+                - aws s3 sync --quiet public s3://${PreviewWebsite}
+          artifacts:
+            base-directory: jam/public
+            files:
+              - '**/*'
+      ServiceRole: !Ref CodeBuildServiceRole
+      TimeoutInMinutes: 30
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref LogsGroup
+          StreamName: build
+
+  CodeBuildProjectDeploy:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub ${AWS::StackName}-deploy
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Type: LINUX_CONTAINER
+        Image: aws/codebuild/amazonlinux2-x86_64-standard:3.0
+      Source:
+        Type: CODEPIPELINE
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            build:
+              commands:
+                - aws s3 sync --quiet . s3://${Website} --exclude "*.map" --cache-control no-cache --metadata-directive REPLACE
+      ServiceRole: !Ref CodeBuildServiceRole
+      TimeoutInMinutes: 30
+      LogsConfig:
+        CloudWatchLogs:
+          Status: ENABLED
+          GroupName: !Ref LogsGroup
+          StreamName: deploy
+
+  DoNotTouchThis: # Shop database's CloudWatch Trail and CodePipeline artifacts bucket.
+    # Required for kicking off the build, and storing artifacts.
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref DoNotTouchThis
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt DoNotTouchThis.Arn
+          - Effect: Allow
+            Principal:
+              Service: cloudtrail.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub ${DoNotTouchThis.Arn}/AWSLogs/${AWS::AccountId}/*
+            Condition:
+              StringEquals:
+                s3:x-amz-acl: bucket-owner-full-control
+
+  CloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn:
+      - CloudTrailBucketPolicy
+    Properties:
+      S3BucketName: !Ref DoNotTouchThis
+      EventSelectors:
+        - DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                - !Sub ${ShopDatabase.Arn}/
+          ReadWriteType: WriteOnly
+      IncludeGlobalServiceEvents: true
+      IsLogging: true
+
+  EventsRule:
+    Type: AWS::Events::Rule
+    Properties:
+      EventPattern: !Sub |
+        {
+          "source":["aws.s3"],
+          "detail-type":["AWS API Call via CloudTrail"],
+          "detail":{
+            "eventSource":["s3.amazonaws.com"],
+            "eventName":["PutObject","CompleteMultipartUpload","CopyObject"],
+            "requestParameters":{
+              "bucketName":["${ShopDatabase}"],
+              "key":[
+                "${InventoryArchiveFileName}",
+                "${ShippingRulesArchiveFileName}",
+                "${ShopSettingsArchiveFileName}"
+              ]
+            }
+          }
+        }
+      Targets:
+        - Id: codepipeline
+          Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Update}
+          RoleArn: !GetAtt EventsServiceRole.Arn
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref CodePipelineServicePolicy
+
+  CodePipelineServicePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource: !Sub arn:aws:s3:::${DoNotTouchThis}/*
+            Effect: Allow
+          - Action:
+              - s3:ListBucket
+              - s3:GetBucketVersioning
+            Resource: !Sub arn:aws:s3:::${DoNotTouchThis}
+            Effect: Allow
+          - Resource: !Sub arn:aws:s3:::${ShopDatabase}/*
+            Effect: Allow
+            Action:
+              - s3:GetObject
+              - s3:GetObjectVersion
+          - Resource: !Sub arn:aws:s3:::${ShopDatabase}
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketVersioning
+          - Action:
+              - codebuild:StartBuild
+              - codebuild:BatchGetBuilds
+            Resource:
+              - !GetAtt CodeBuildProjectBuild.Arn
+              - !GetAtt CodeBuildProjectDeploy.Arn
+            Effect: Allow
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref CodeBuildServicePolicy
+
+  CodeBuildServicePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - s3:DeleteObject
+              - s3:PutObject
+            Resource:
+              - !Sub arn:aws:s3:::${Website}/*
+              - !Sub arn:aws:s3:::${PreviewWebsite}/*
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource:
+              - !Sub arn:aws:s3:::${ProductImages}/*
+              - !Sub arn:aws:s3:::${Assets}/*
+          - Effect: Allow
+            Action:
+              - s3:ListBucket
+              - s3:GetBucketLocation
+            Resource:
+              - !GetAtt ProductImages.Arn
+              - !GetAtt Assets.Arn
+              - !GetAtt Website.Arn
+              - !GetAtt PreviewWebsite.Arn
+          - Effect: Allow
+            Resource: !Sub arn:aws:s3:::${DoNotTouchThis}/*
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+          - Effect: Allow
+            Resource: !Sub arn:aws:s3:::${DoNotTouchThis}
+            Action:
+              - s3:GetBucketAcl
+              - s3:GetBucketLocation
+          - Effect: Allow
+            Resource: !GetAtt Backend.Arn
+            Action: lambda:GetFunction
+          - Effect: Allow
+            Resource: "*"
+            Action: codepipeline:PutJob*Result
+          - Effect: Allow
+            Resource: !GetAtt LogsGroup.Arn
+            Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+
+  EventsServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: /
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - !Ref EventsServicePolicy
+
+  EventsServicePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Resource: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${Update}
+            Action: codepipeline:StartPipelineExecution
+
+  LogsGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref AWS::StackName
+      RetentionInDays: 30
+
+  BackendApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+      DefinitionBody:
+        openapi: 3.0
+        info:
+          title: !Ref AWS::StackName
+        paths:
+          /paymentintent:
+            options:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Backend.Arn}/invocations
+              responses: {}
+            post:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Backend.Arn}/invocations
+              responses: {}
+          /stripewebhook:
+            options:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Backend.Arn}/invocations
+              responses: {}
+            post:
+              x-amazon-apigateway-integration:
+                httpMethod: POST
+                type: aws_proxy
+                uri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${Backend.Arn}/invocations
+              responses: {}
+
+  Backend:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      Runtime: nodejs12.x
+      CodeUri: lambda
+      Timeout: 15
+      Environment:
+        Variables:
+          STRIPE_SECRET_KEY: !Ref StripeSecretKey
+          STRIPE_SIGNING_SECRET: !Ref StripeWebhookSigningSecret
+          SHOP_DATABASE_BUCKET_NAME: !Ref ShopDatabase
+          INVENTORY_ARCHIVE_FILE_NAME: !Ref InventoryArchiveFileName
+          SHIPPING_RULES_ARCHIVE_FILE_NAME: !Ref ShippingRulesArchiveFileName
+          SHOP_SETTINGS_ARCHIVE_FILE_NAME: !Ref ShopSettingsArchiveFileName
+          CORS_ORIGINS: !Join
+            - ","
+            - - !GetAtt PreviewWebsite.WebsiteURL
+              - !Sub
+                - https://${DomainName}
+                - DomainName: !If
+                    - CustomDomainNameAndCertificate
+                    - !Ref DomainName
+                    - !GetAtt CloudFrontDistribution.DomainName
+          SHOP_NAME: !Ref ShopName
+          SHOP_LEGAL_ADDRESS: !Ref ShopLegalAddress
+          SHOP_EMAIL: !Ref ShopEmail
+          FROM_EMAIL: !If
+            - CustomDomainName
+            - !Sub no-reply@${DomainName}
+            - !Ref AWS::NoValue
+          SHOP_URL: !Sub
+            - https://${DomainName}
+            - DomainName: !If
+                - CustomDomainNameAndCertificate
+                - !Ref DomainName
+                - !GetAtt CloudFrontDistribution.DomainName
+          SES_REGION: !Ref AWS::Region
+          SES_TEMPLATE_NAME: !Ref EmailTemplate
+          SEND_ORDER_CONFIRMATION_EMAIL: !Ref SendOrderConfirmationEmail
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: s3:GetObject
+              Resource: !Sub ${ShopDatabase.Arn}/*
+        - Statement:
+            - Effect: Allow
+              Action: ses:SendTemplatedEmail
+              Resource: "*"
+
+  BackendPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Sub ${Backend.Arn}
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${BackendApi}/*/*
+
+  EmailTemplate:
+    Type: AWS::SES::Template
+    Properties:
+      Template:
+        TemplateName: !Ref AWS::StackName
+        SubjectPart: "{{shopname}} Order confirmation"
+        HtmlPart: |
+          <!DOCTYPE html
+          PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+          <html xmlns="http://www.w3.org/1999/xhtml" xmlns:o="urn:schemas-microsoft-com:office:office"
+          style="width:100%;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%;padding:0;Margin:0">
+
+          <head>
+          <meta charset="UTF-8">
+          <meta content="width=device-width, initial-scale=1" name="viewport">
+          <meta name="x-apple-disable-message-reformatting">
+          <meta http-equiv="X-UA-Compatible" content="IE=edge">
+          <meta content="telephone=no" name="format-detection">
+          <title>{{shopname}}</title>
+          <!--[if (mso 16)]>
+          <style type="text/css">
+          a {text-decoration: none;}
+          </style>
+          <![endif]-->
+          <!--[if gte mso 9]><style>sup { font-size: 100% !important; }</style><![endif]-->
+          <!--[if gte mso 9]>
+          <xml>
+          <o:OfficeDocumentSettings>
+          <o:AllowPNG></o:AllowPNG>
+          <o:PixelsPerInch>96</o:PixelsPerInch>
+          </o:OfficeDocumentSettings>
+          </xml>
+          <![endif]-->
+          <!--[if !mso]><!-- -->
+          <link href="https://fonts.googleapis.com/css?family=Open+Sans:400,400i,700,700i" rel="stylesheet">
+          <!--<![endif]-->
+          <style type="text/css">
+              @media only screen and (max-width:600px) {
+
+                  p,
+                  ul li,
+                  ol li,
+                  a {
+                      font-size: 16px !important;
+                      line-height: 150% !important
+                  }
+
+                  h1 {
+                      font-size: 32px !important;
+                      text-align: center;
+                      line-height: 120% !important
+                  }
+
+                  h2 {
+                      font-size: 26px !important;
+                      text-align: center;
+                      line-height: 120% !important
+                  }
+
+                  h3 {
+                      font-size: 20px !important;
+                      text-align: center;
+                      line-height: 120% !important
+                  }
+
+                  h1 a {
+                      font-size: 32px !important
+                  }
+
+                  h2 a {
+                      font-size: 26px !important
+                  }
+
+                  h3 a {
+                      font-size: 20px !important
+                  }
+
+                  .es-menu td a {
+                      font-size: 16px !important
+                  }
+
+                  .es-header-body p,
+                  .es-header-body ul li,
+                  .es-header-body ol li,
+                  .es-header-body a {
+                      font-size: 16px !important
+                  }
+
+                  .es-footer-body p,
+                  .es-footer-body ul li,
+                  .es-footer-body ol li,
+                  .es-footer-body a {
+                      font-size: 16px !important
+                  }
+
+                  .es-infoblock p,
+                  .es-infoblock ul li,
+                  .es-infoblock ol li,
+                  .es-infoblock a {
+                      font-size: 12px !important
+                  }
+
+                  *[class="gmail-fix"] {
+                      display: none !important
+                  }
+
+                  .es-m-txt-c,
+                  .es-m-txt-c h1,
+                  .es-m-txt-c h2,
+                  .es-m-txt-c h3 {
+                      text-align: center !important
+                  }
+
+                  .es-m-txt-r,
+                  .es-m-txt-r h1,
+                  .es-m-txt-r h2,
+                  .es-m-txt-r h3 {
+                      text-align: right !important
+                  }
+
+                  .es-m-txt-l,
+                  .es-m-txt-l h1,
+                  .es-m-txt-l h2,
+                  .es-m-txt-l h3 {
+                      text-align: left !important
+                  }
+
+                  .es-m-txt-r img,
+                  .es-m-txt-c img,
+                  .es-m-txt-l img {
+                      display: inline !important
+                  }
+
+                  .es-button-border {
+                      display: inline-block !important
+                  }
+
+                  a.es-button {
+                      font-size: 16px !important;
+                      display: inline-block !important;
+                      border-width: 15px 30px 15px 30px !important
+                  }
+
+                  .es-btn-fw {
+                      border-width: 10px 0px !important;
+                      text-align: center !important
+                  }
+
+                  .es-adaptive table,
+                  .es-btn-fw,
+                  .es-btn-fw-brdr,
+                  .es-left,
+                  .es-right {
+                      width: 100% !important
+                  }
+
+                  .es-content table,
+                  .es-header table,
+                  .es-footer table,
+                  .es-content,
+                  .es-footer,
+                  .es-header {
+                      width: 100% !important;
+                      max-width: 600px !important
+                  }
+
+                  .es-adapt-td {
+                      display: block !important;
+                      width: 100% !important
+                  }
+
+                  .adapt-img {
+                      width: 100% !important;
+                      height: auto !important
+                  }
+
+                  .es-m-p0 {
+                      padding: 0px !important
+                  }
+
+                  .es-m-p0r {
+                      padding-right: 0px !important
+                  }
+
+                  .es-m-p0l {
+                      padding-left: 0px !important
+                  }
+
+                  .es-m-p0t {
+                      padding-top: 0px !important
+                  }
+
+                  .es-m-p0b {
+                      padding-bottom: 0 !important
+                  }
+
+                  .es-m-p20b {
+                      padding-bottom: 20px !important
+                  }
+
+                  .es-mobile-hidden,
+                  .es-hidden {
+                      display: none !important
+                  }
+
+                  tr.es-desk-hidden,
+                  td.es-desk-hidden,
+                  table.es-desk-hidden {
+                      display: table-row !important;
+                      width: auto !important;
+                      overflow: visible !important;
+                      float: none !important;
+                      max-height: inherit !important;
+                      line-height: inherit !important
+                  }
+
+                  .es-desk-menu-hidden {
+                      display: table-cell !important
+                  }
+
+                  table.es-table-not-adapt,
+                  .esd-block-html table {
+                      width: auto !important
+                  }
+
+                  table.es-social {
+                      display: inline-block !important
+                  }
+
+                  table.es-social td {
+                      display: inline-block !important
+                  }
+              }
+
+              #outlook a {
+                  padding: 0;
+              }
+
+              .ExternalClass {
+                  width: 100%;
+              }
+
+              .ExternalClass,
+              .ExternalClass p,
+              .ExternalClass span,
+              .ExternalClass font,
+              .ExternalClass td,
+              .ExternalClass div {
+                  line-height: 100%;
+              }
+
+              .es-button {
+                  mso-style-priority: 100 !important;
+                  text-decoration: none !important;
+              }
+
+              a[x-apple-data-detectors] {
+                  color: inherit !important;
+                  text-decoration: none !important;
+                  font-size: inherit !important;
+                  font-family: inherit !important;
+                  font-weight: inherit !important;
+                  line-height: inherit !important;
+              }
+
+              .es-desk-hidden {
+                  display: none;
+                  float: left;
+                  overflow: hidden;
+                  width: 0;
+                  max-height: 0;
+                  line-height: 0;
+                  mso-hide: all;
+              }
+          </style>
+          </head>
+
+          <body
+          style="width:100%;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;-webkit-text-size-adjust:100%;-ms-text-size-adjust:100%;padding:0;Margin:0">
+          <div class="es-wrapper-color" style="background-color:#EEEEEE">
+              <!--[if gte mso 9]>
+            <v:background xmlns:v="urn:schemas-microsoft-com:vml" fill="t">
+              <v:fill type="tile" color="#eeeeee"></v:fill>
+            </v:background>
+          <![endif]-->
+              <table class="es-wrapper" width="100%" cellspacing="0" cellpadding="0"
+                  style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;padding:0;Margin:0;width:100%;height:100%;background-repeat:repeat;background-position:center top">
+                  <tr style="border-collapse:collapse">
+                      <td valign="top" style="padding:0;Margin:0">
+                          <table class="es-content" cellspacing="0" cellpadding="0" align="center"
+                              style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;table-layout:fixed !important;width:100%">
+                              <tr style="border-collapse:collapse"></tr>
+                              <tr style="border-collapse:collapse">
+                                  <td align="center" style="padding:0;Margin:0">
+                                      <table class="es-header-body"
+                                          style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;background-color:#044767;width:600px"
+                                          cellspacing="0" cellpadding="0" bgcolor="#044767" align="center">
+                                          <tr style="border-collapse:collapse">
+                                              <td align="left"
+                                                  style="Margin:0;padding-top:35px;padding-bottom:35px;padding-left:35px;padding-right:35px">
+                                                  <!--[if mso]><table style="width:530px" cellpadding="0" cellspacing="0"><tr><td style="width:340px" valign="top"><![endif]-->
+                                                  <table class="es-left" cellspacing="0" cellpadding="0" align="left"
+                                                      style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;float:left">
+                                                      <tr style="border-collapse:collapse">
+                                                          <td class="es-m-p0r es-m-p20b" valign="top" align="center"
+                                                              style="padding:0;Margin:0;width:340px">
+                                                              <table width="100%" cellspacing="0" cellpadding="0"
+                                                                  role="presentation"
+                                                                  style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td class="es-m-txt-c" align="left"
+                                                                          style="padding:0;Margin:0">
+                                                                          <h1
+                                                                              style="Margin:0;line-height:36px;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;font-size:36px;font-style:normal;font-weight:bold;color:#FFFFFF">
+                                                                              {{shopname}}</h1>
+                                                                      </td>
+                                                                  </tr>
+                                                              </table>
+                                                          </td>
+                                                      </tr>
+                                                  </table>
+                                                  <!--[if mso]></td><td style="width:20px"></td><td style="width:170px" valign="top"><![endif]-->
+                                                  <table cellspacing="0" cellpadding="0" align="right"
+                                                      style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                      <tr class="es-hidden" style="border-collapse:collapse">
+                                                          <td class="es-m-p20b" align="left"
+                                                              style="padding:0;Margin:0;width:170px">
+                                                              <table width="100%" cellspacing="0" cellpadding="0"
+                                                                  role="presentation"
+                                                                  style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td align="center"
+                                                                          style="padding:0;Margin:0;padding-bottom:5px;font-size:0">
+                                                                          <table width="100%" height="100%" cellspacing="0"
+                                                                              cellpadding="0" border="0" role="presentation"
+                                                                              style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                              <tr style="border-collapse:collapse">
+                                                                                  <td
+                                                                                      style="padding:0;Margin:0;border-bottom:1px solid #044767;background:#FFFFFFnone repeat scroll 0% 0%;height:1px;width:100%;margin:0px">
+                                                                                  </td>
+                                                                              </tr>
+                                                                          </table>
+                                                                      </td>
+                                                                  </tr>
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td style="padding:0;Margin:0">
+                                                                          <table cellspacing="0" cellpadding="0" align="right"
+                                                                              role="presentation"
+                                                                              style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                              <tr style="border-collapse:collapse">
+                                                                                  <td align="left" style="padding:0;Margin:0">
+                                                                                      <table width="100%" cellspacing="0"
+                                                                                          cellpadding="0" role="presentation"
+                                                                                          style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                                          <tr
+                                                                                              style="border-collapse:collapse">
+                                                                                              <td align="right"
+                                                                                                  style="padding:0;Margin:0">
+                                                                                                  <p
+                                                                                                      style="Margin:0;-webkit-text-size-adjust:none;-ms-text-size-adjust:none;mso-line-height-rule:exactly;font-size:14px;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;line-height:21px;color:#FFFFFF">
+                                                                                                      <a target="_blank"
+                                                                                                          style="-webkit-text-size-adjust:none;-ms-text-size-adjust:none;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;font-size:18px;text-decoration:none;color:#FFFFFF;line-height:22px"
+                                                                                                          href="{{shopurl}}">Shop</a>
+                                                                                                  </p>
+                                                                                              </td>
+                                                                                          </tr>
+                                                                                      </table>
+                                                                                  </td>
+                                                                                  <td valign="top" align="left"
+                                                                                      style="padding:0;Margin:0;padding-left:10px;font-size:0">
+                                                                                      <a href="https://viewstripo.email"
+                                                                                          target="_blank"
+                                                                                          style="-webkit-text-size-adjust:none;-ms-text-size-adjust:none;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;font-size:14px;text-decoration:none;color:#FFFFFF"><img
+                                                                                              src="https://ikpbnv.stripocdn.email/content/guids/CABINET_75694a6fc3c4633b3ee8e3c750851c02/images/77981522050090360.png"
+                                                                                              alt
+                                                                                              style="display:block;border:0;outline:none;text-decoration:none;-ms-interpolation-mode:bicubic"
+                                                                                              width="27"></a></td>
+                                                                              </tr>
+                                                                          </table>
+                                                                      </td>
+                                                                  </tr>
+                                                              </table>
+                                                          </td>
+                                                      </tr>
+                                                  </table>
+                                                  <!--[if mso]></td></tr></table><![endif]-->
+                                              </td>
+                                          </tr>
+                                      </table>
+                                  </td>
+                              </tr>
+                          </table>
+                          <table class="es-content" cellspacing="0" cellpadding="0" align="center"
+                              style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;table-layout:fixed !important;width:100%">
+                              <tr style="border-collapse:collapse">
+                                  <td align="center" style="padding:0;Margin:0">
+                                      <table class="es-content-body" cellspacing="0" cellpadding="0" bgcolor="#ffffff"
+                                          align="center"
+                                          style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;background-color:#FFFFFF;width:600px">
+                                          <tr style="border-collapse:collapse">
+                                              <td align="left"
+                                                  style="padding:0;Margin:0;padding-left:35px;padding-right:35px;padding-top:40px">
+                                                  <table width="100%" cellspacing="0" cellpadding="0"
+                                                      style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                      <tr style="border-collapse:collapse">
+                                                          <td valign="top" align="center"
+                                                              style="padding:0;Margin:0;width:530px">
+                                                              <table width="100%" cellspacing="0" cellpadding="0"
+                                                                  role="presentation"
+                                                                  style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td align="center"
+                                                                          style="Margin:0;padding-top:25px;padding-bottom:25px;padding-left:35px;padding-right:35px;font-size:0">
+                                                                          <a target="_blank" href="https://viewstripo.email/"
+                                                                              style="-webkit-text-size-adjust:none;-ms-text-size-adjust:none;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;font-size:16px;text-decoration:none;color:#ED8E20"><img
+                                                                                  src="https://ikpbnv.stripocdn.email/content/guids/CABINET_75694a6fc3c4633b3ee8e3c750851c02/images/67611522142640957.png"
+                                                                                  alt
+                                                                                  style="display:block;border:0;outline:none;text-decoration:none;-ms-interpolation-mode:bicubic"
+                                                                                  width="120"></a></td>
+                                                                  </tr>
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td align="center"
+                                                                          style="padding:0;Margin:0;padding-bottom:10px">
+                                                                          <h2
+                                                                              style="Margin:0;line-height:36px;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;font-size:30px;font-style:normal;font-weight:bold;color:#333333">
+                                                                              Thank You For Your Order!</h2>
+                                                                      </td>
+                                                                  </tr>
+                                                              </table>
+                                                          </td>
+                                                      </tr>
+                                                  </table>
+                                              </td>
+                                          </tr>
+                                      </table>
+                                  </td>
+                              </tr>
+                          </table>
+                          <table class="es-content" cellspacing="0" cellpadding="0" align="center"
+                              style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;table-layout:fixed !important;width:100%">
+                              <tr style="border-collapse:collapse">
+                                  <td align="center" style="padding:0;Margin:0">
+                                      <table class="es-content-body" cellspacing="0" cellpadding="0" bgcolor="#ffffff"
+                                          align="center"
+                                          style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;background-color:#FFFFFF;width:600px">
+                                          <tr style="border-collapse:collapse">
+                                              <td align="left"
+                                                  style="padding:0;Margin:0;padding-top:20px;padding-left:35px;padding-right:35px">
+                                                  <table width="100%" cellspacing="0" cellpadding="0"
+                                                      style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                      <tr style="border-collapse:collapse">
+                                                          <td valign="top" align="center"
+                                                              style="padding:0;Margin:0;width:530px">
+                                                              <table width="100%" cellspacing="0" cellpadding="0"
+                                                                  role="presentation"
+                                                                  style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td bgcolor="#eeeeee" align="left"
+                                                                          style="Margin:0;padding-top:10px;padding-bottom:10px;padding-left:10px;padding-right:10px">
+                                                                          <table
+                                                                              style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;width:500px"
+                                                                              class="cke_show_border" cellspacing="1"
+                                                                              cellpadding="1" border="0" align="left"
+                                                                              role="presentation">
+                                                                              <tr style="border-collapse:collapse">
+                                                                                  <td width="80%" style="padding:0;Margin:0">
+                                                                                      <h4
+                                                                                          style="Margin:0;line-height:120%;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif">
+                                                                                          Order Confirmation #</h4>
+                                                                                  </td>
+                                                                                  <td width="20%" style="padding:0;Margin:0">
+                                                                                      <h4
+                                                                                          style="Margin:0;line-height:120%;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif">
+                                                                                          {{ordernum}}</h4>
+                                                                                  </td>
+                                                                              </tr>
+                                                                          </table>
+                                                                      </td>
+                                                                  </tr>
+                                                              </table>
+                                                          </td>
+                                                      </tr>
+                                                  </table>
+                                              </td>
+                                          </tr>
+                                          <tr style="border-collapse:collapse">
+                                              <td align="left"
+                                                  style="padding:0;Margin:0;padding-left:35px;padding-right:35px">
+                                                  <table width="100%" cellspacing="0" cellpadding="0"
+                                                      style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                      <tr style="border-collapse:collapse">
+                                                          <td valign="top" align="center"
+                                                              style="padding:0;Margin:0;width:530px">
+                                                              <table width="100%" cellspacing="0" cellpadding="0"
+                                                                  role="presentation"
+                                                                  style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td align="left"
+                                                                          style="Margin:0;padding-top:10px;padding-bottom:10px;padding-left:10px;padding-right:10px">
+                                                                          <table
+                                                                              style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;width:500px"
+                                                                              class="cke_show_border" cellspacing="1"
+                                                                              cellpadding="1" border="0" align="left"
+                                                                              role="presentation">
+                                                                              <tr style="border-collapse:collapse">
+                                                                                  <td style="padding:5px 10px 5px 0;Margin:0"
+                                                                                      width="80%" align="left">
+                                                                                      <p
+                                                                                          style="Margin:0;-webkit-text-size-adjust:none;-ms-text-size-adjust:none;mso-line-height-rule:exactly;font-size:16px;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;line-height:24px;color:#333333">
+                                                                                          Purchased Items ({{itemsdescription}})</p>
+                                                                                  </td>
+                                                                                  <td style="padding:5px 0;Margin:0"
+                                                                                      width="20%" align="left">
+                                                                                      <p
+                                                                                          style="Margin:0;text-align:right;-webkit-text-size-adjust:right;-ms-text-size-adjust:right;mso-line-height-rule:exactly;font-size:16px;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;line-height:24px;color:#333333">
+                                                                                          {{total}} {{currency}}</p>
+                                                                                  </td>
+                                                                              </tr>
+                                                                              <tr style="border-collapse:collapse">
+                                                                                  <td style="padding:5px 10px 5px 0;Margin:0"
+                                                                                      width="80%" align="left">
+                                                                                      <p
+                                                                                          style="Margin:0;-webkit-text-size-adjust:none;-ms-text-size-adjust:none;mso-line-height-rule:exactly;font-size:16px;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;line-height:24px;color:#333333">
+                                                                                          Shipping + Handling</p>
+                                                                                  </td>
+                                                                                  <td style="padding:5px 0;Margin:0"
+                                                                                      width="20%" align="left">
+                                                                                      <p
+                                                                                          style="Margin:0;text-align:right;-webkit-text-size-adjust:right;-ms-text-size-adjust:right;mso-line-height-rule:exactly;font-size:16px;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;line-height:24px;color:#333333">
+                                                                                          {{shippinghandlingcost}} {{currency}}</p>
+                                                                                  </td>
+                                                                              </tr>
+                                                                              <tr style="border-collapse:collapse">
+                                                                                  <td style="padding:5px 10px 5px 0;Margin:0"
+                                                                                      width="80%" align="left">
+                                                                                      <p
+                                                                                          style="Margin:0;-webkit-text-size-adjust:none;-ms-text-size-adjust:none;mso-line-height-rule:exactly;font-size:16px;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;line-height:24px;color:#333333">
+                                                                                          Sales Tax</p>
+                                                                                  </td>
+                                                                                  <td style="padding:5px 0;Margin:0"
+                                                                                      width="20%" align="left">
+                                                                                      <p
+                                                                                          style="Margin:0;text-align:right;-webkit-text-size-adjust:right;-ms-text-size-adjust:right;mso-line-height-rule:exactly;font-size:16px;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;line-height:24px;color:#333333">
+                                                                                          {{taxes}} {{currency}}</p>
+                                                                                  </td>
+                                                                              </tr>
+                                                                          </table>
+                                                                      </td>
+                                                                  </tr>
+                                                              </table>
+                                                          </td>
+                                                      </tr>
+                                                  </table>
+                                              </td>
+                                          </tr>
+                                          <tr style="border-collapse:collapse">
+                                              <td align="left"
+                                                  style="padding:0;Margin:0;padding-top:10px;padding-left:35px;padding-right:35px">
+                                                  <table width="100%" cellspacing="0" cellpadding="0"
+                                                      style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                      <tr style="border-collapse:collapse">
+                                                          <td valign="top" align="center"
+                                                              style="padding:0;Margin:0;width:530px">
+                                                              <table
+                                                                  style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;border-top:3px solid #EEEEEE;border-bottom:3px solid #EEEEEE"
+                                                                  width="100%" cellspacing="0" cellpadding="0"
+                                                                  role="presentation">
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td align="left"
+                                                                          style="Margin:0;padding-left:10px;padding-right:10px;padding-top:15px;padding-bottom:15px">
+                                                                          <table
+                                                                              style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;width:500px"
+                                                                              class="cke_show_border" cellspacing="1"
+                                                                              cellpadding="1" border="0" align="left"
+                                                                              role="presentation">
+                                                                              <tr style="border-collapse:collapse">
+                                                                                  <td width="80%" style="padding:0;Margin:0">
+                                                                                      <h4
+                                                                                          style="Margin:0;line-height:120%;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif">
+                                                                                          TOTAL</h4>
+                                                                                  </td>
+                                                                                  <td width="20%" style="padding:0;Margin:0">
+                                                                                      <h4
+                                                                                          style="Margin:0;line-height:120%;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif">
+                                                                                          {{grandtotal}} {{currency}}</h4>
+                                                                                  </td>
+                                                                              </tr>
+                                                                          </table>
+                                                                      </td>
+                                                                  </tr>
+                                                              </table>
+                                                          </td>
+                                                      </tr>
+                                                  </table>
+                                              </td>
+                                          </tr>
+                                          <tr style="border-collapse:collapse">
+                                              <td align="left"
+                                                  style="Margin:0;padding-left:35px;padding-right:35px;padding-top:40px;padding-bottom:40px">
+                                                  <!--[if mso]><table style="width:530px" cellpadding="0" cellspacing="0"><tr><td style="width:255px" valign="top"><![endif]-->
+                                                  <table class="es-left" cellspacing="0" cellpadding="0" align="left"
+                                                      style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;float:left">
+                                                      <tr style="border-collapse:collapse">
+                                                          <td class="es-m-p20b" align="left"
+                                                              style="padding:0;Margin:0;width:255px">
+                                                              <table width="100%" cellspacing="0" cellpadding="0"
+                                                                  role="presentation"
+                                                                  style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td align="left"
+                                                                          style="padding:0;Margin:0;padding-bottom:15px">
+                                                                          <h4
+                                                                              style="Margin:0;line-height:120%;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif">
+                                                                              Delivery Address</h4>
+                                                                      </td>
+                                                                  </tr>
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td align="left"
+                                                                          style="padding:0;Margin:0;padding-bottom:10px">
+                                                                          <p
+                                                                              style="Margin:0;-webkit-text-size-adjust:none;-ms-text-size-adjust:none;mso-line-height-rule:exactly;font-size:16px;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;line-height:24px;color:#333333">
+                                                                              {{shippingaddress}}</p>
+                                                                      </td>
+                                                                  </tr>
+                                                              </table>
+                                                          </td>
+                                                      </tr>
+                                                  </table>
+                                                  <!--[if mso]></td></tr></table><![endif]-->
+                                              </td>
+                                          </tr>
+                                      </table>
+                                  </td>
+                              </tr>
+                          </table>
+                          <table cellpadding="0" cellspacing="0" class="es-footer" align="center"
+                              style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;table-layout:fixed !important;width:100%;background-color:transparent;background-repeat:repeat;background-position:center top">
+                              <tr style="border-collapse:collapse">
+                                  <td align="center" style="padding:0;Margin:0">
+                                      <table class="es-footer-body" cellspacing="0" cellpadding="0" align="center"
+                                          style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;background-color:#FFFFFF;width:600px">
+                                          <tr style="border-collapse:collapse">
+                                              <td align="left"
+                                                  style="Margin:0;padding-top:35px;padding-left:35px;padding-right:35px;padding-bottom:40px">
+                                                  <table width="100%" cellspacing="0" cellpadding="0"
+                                                      style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                      <tr style="border-collapse:collapse">
+                                                          <td valign="top" align="center"
+                                                              style="padding:0;Margin:0;width:530px">
+                                                              <table width="100%" cellspacing="0" cellpadding="0"
+                                                                  role="presentation"
+                                                                  style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td align="center"
+                                                                          style="padding:0;Margin:0;padding-bottom:35px">
+                                                                          <p
+                                                                              style="Margin:0;-webkit-text-size-adjust:none;-ms-text-size-adjust:none;mso-line-height-rule:exactly;font-size:14px;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;line-height:21px;color:#333333">
+                                                                              <strong>{{shopname}} {{shoplegaladdress}}</strong></p>
+                                                                      </td>
+                                                                  </tr>
+                                                              </table>
+                                                          </td>
+                                                      </tr>
+                                                  </table>
+                                              </td>
+                                          </tr>
+                                      </table>
+                                  </td>
+                              </tr>
+                          </table>
+                          <table class="es-content" cellspacing="0" cellpadding="0" align="center"
+                              style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;table-layout:fixed !important;width:100%">
+                              <tr style="border-collapse:collapse">
+                                  <td align="center" style="padding:0;Margin:0">
+                                      <table class="es-content-body"
+                                          style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px;background-color:transparent;width:600px"
+                                          cellspacing="0" cellpadding="0" align="center">
+                                          <tr style="border-collapse:collapse">
+                                              <td align="left"
+                                                  style="Margin:0;padding-left:20px;padding-right:20px;padding-top:30px;padding-bottom:30px">
+                                                  <table width="100%" cellspacing="0" cellpadding="0"
+                                                      style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                      <tr style="border-collapse:collapse">
+                                                          <td valign="top" align="center"
+                                                              style="padding:0;Margin:0;width:560px">
+                                                              <table width="100%" cellspacing="0" cellpadding="0"
+                                                                  role="presentation"
+                                                                  style="mso-table-lspace:0pt;mso-table-rspace:0pt;border-collapse:collapse;border-spacing:0px">
+                                                                  <tr style="border-collapse:collapse">
+                                                                      <td class="es-infoblock made_with" align="center"
+                                                                          style="padding:0;Margin:0;line-height:120%;font-size:0;color:#CCCCCC">
+                                                                          <a target="_blank"
+                                                                              href="https://viewstripo.email/"
+                                                                              style="-webkit-text-size-adjust:none;-ms-text-size-adjust:none;mso-line-height-rule:exactly;font-family:'open sans', 'helvetica neue', helvetica, arial, sans-serif;font-size:12px;text-decoration:none;color:#CCCCCC"><img
+                                                                                  src="https://ikpbnv.stripocdn.email/content/guids/CABINET_9df86e5b6c53dd0319931e2447ed854b/images/64951510234941531.png"
+                                                                                  alt width="125"
+                                                                                  style="display:block;border:0;outline:none;text-decoration:none;-ms-interpolation-mode:bicubic"></a>
+                                                                      </td>
+                                                                  </tr>
+                                                              </table>
+                                                          </td>
+                                                      </tr>
+                                                  </table>
+                                              </td>
+                                          </tr>
+                                      </table>
+                                  </td>
+                              </tr>
+                          </table>
+                      </td>
+                  </tr>
+              </table>
+          </div>
+          </body>
+
+          </html>
+
+  HostedZone:
+    Condition: CustomDomainName
+    Type: AWS::Route53::HostedZone
+    Properties:
+      Name: !Ref DomainName
+
+  DNSRecordSetMainDomain:
+    Condition: CustomDomainName
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2 # The constant for CloudFront target
+        DNSName: !GetAtt CloudFrontDistribution.DomainName
+      HostedZoneId: !Ref HostedZone
